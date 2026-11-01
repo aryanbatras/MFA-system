@@ -1,177 +1,313 @@
 # MFA System
 
-Enterprise-grade Multi-Factor Authentication built with Next.js 15, Better Auth, and Turso Cloud (LibSQL).
+Passwordless authentication with an email one-time code as the first factor and a mandatory TOTP authenticator app as the second factor. Built with Next.js, Better Auth, Turso Cloud, and Resend.
 
-> **Built with [IBM Bob](https://www.ibm.com/bob)** — AI-powered software engineering tool by IBM.
-
----
-
-## Overview
-
-A production-ready authentication system featuring:
-
-- **Email + Password authentication** via Better Auth
-- **TOTP-based 2FA** (Google Authenticator, Authy, 1Password, any RFC 6238-compliant app)
-- **Serverless-ready** — deploys to Vercel, Netlify, or any Next.js-compatible host
-- **Turso Cloud database** — globally distributed LibSQL (SQLite-compatible)
-- **No third-party OAuth required** — entirely self-hosted identity flow
+> **Built with [IBM Bob](https://www.ibm.com/bob)** — IBM's AI-powered software engineering tool. The application, database migration, documentation, and review were produced with IBM Bob.
 
 ---
 
-## Tech Stack
+## What this is
+
+A focused, production-shaped authentication application:
+
+- Sign up with an email address only. There is no name field and no password.
+- Sign in with a six-digit email code.
+- Every account must connect an authenticator app before it can reach the dashboard.
+- Every subsequent sign-in requires the email code **and** a TOTP code.
+- Ten single-use recovery codes are generated during setup.
+- The dashboard is a protected destination that shows the account's security posture.
+
+The interface is intentionally quiet: white background, Inter typography, square controls, large actions, no decorative gradients, shadows, hover effects, or emoji.
+
+---
+
+## Why `/mfa-setup` no longer asks for a password
+
+Better Auth's two-factor plugin requires a password before enabling TOTP by default. Accounts created through email OTP do not have a credential account, so there is no password to check. That is why the old flow failed or asked for a password that never existed.
+
+This project fixes the root cause in two places:
+
+1. `twoFactor({ allowPasswordless: true })` tells Better Auth to skip the password check when the user has no credential account.
+2. The MFA setup UI calls `twoFactor.enable({ method: "totp" })` and goes straight to the QR code. It never renders a password field.
+
+There is no password anywhere in the application. `emailAndPassword.enabled` is `false`.
+
+---
+
+## Authentication flow
+
+### First visit
+
+```
+/signup
+  -> enter a new email address
+  -> receive six-digit code
+  -> verify code (email factor)
+  -> /mfa-setup
+  -> scan QR with Google Authenticator, 1Password, Authy, etc.
+  -> confirm one six-digit TOTP code
+  -> recovery codes shown once
+  -> /dashboard
+```
+
+If the address already has an account, signup stops and points to `/login`.
+
+### Returning visit
+
+```
+/login
+  -> enter an existing email address
+  -> receive six-digit code
+  -> verify code (email factor)
+  -> /mfa-verify
+  -> enter TOTP code or a recovery code (second factor)
+  -> /dashboard
+```
+
+If the address is not in the database, login stops before sending a code and points to `/signup`.
+
+### Mandatory enrollment
+
+The dashboard redirects to `/mfa-setup` whenever `user.twoFactorEnabled` is false. There is no "skip for now" path. An account cannot reach the protected area with only the email factor.
+
+---
+
+## Security model
+
+| Control | Implementation |
+|---|---|
+| First factor | Better Auth email OTP, six digits, 10-minute expiry |
+| OTP storage | Hashed with `storeOTP: "hashed"`; plaintext codes are never persisted |
+| OTP attempts | Five attempts per code, then the code is exhausted |
+| OTP request limit | Three requests per minute per client and path |
+| Second factor | TOTP, six digits, 30-second period, RFC 6238 compatible |
+| Second factor enforcement | Custom after-hook on `/sign-in/email-otp`; the session is revoked and replaced with a signed challenge cookie until TOTP succeeds |
+| TOTP secret storage | Encrypted by Better Auth using `BETTER_AUTH_SECRET` |
+| Recovery codes | Ten codes, formatted `xxxxx-xxxxx`, encrypted at rest, single use |
+| Account lockout | Ten failed second-factor attempts lock the account for 15 minutes |
+| Session | Seven days, HTTP-only cookie, `SameSite=Lax`, `Secure` in production |
+| Session cache | Five-minute signed cookie cache; the database remains the source of truth |
+| Rate limiting | Database-backed (`rateLimit` table), so limits hold across serverless instances |
+| Login/signup separation | A server-side guard requires an existing account for sign-in and a new address for signup. Unknown logins receive a create-account message; existing signups receive a sign-in message |
+| JWT | Better Auth JWT plugin; short-lived tokens available at `/api/auth/token` and public keys at `/api/auth/jwks` |
+| Transport headers | `nosniff`, `DENY` framing, strict referrer policy, permissions policy, HSTS and CSP in production |
+
+### The email-OTP MFA bypass, and how it is closed
+
+Better Auth's two-factor plugin intercepts `/sign-in/email`, `/sign-in/username`, and `/sign-in/phone-number`. It does **not** intercept `/sign-in/email-otp`. Without an additional hook, an email OTP sign-in would create a full session and skip TOTP entirely.
+
+`src/lib/auth/email-otp-two-factor.ts` closes that gap. After a successful email OTP sign-in:
+
+1. It reads the freshly created session.
+2. If the account has two-factor enabled, it deletes the session cookie and revokes the server-side session.
+3. It writes a short-lived signed `two_factor` challenge cookie and verification records.
+4. It returns `{ twoFactorRedirect: true, twoFactorMethods: ["totp"] }`.
+5. The standard `/two-factor/verify-totp` or `/two-factor/verify-backup-code` endpoint creates the real session only after the second factor succeeds.
+
+The hook fails closed: if an account is flagged as protected but its enrollment record is missing or inconsistent, no usable session is issued.
+
+### Login and signup are separate flows
+
+Better Auth's email-OTP sign-in endpoint creates an account when the address is new. That is useful for a pure passwordless product, but it makes a mistyped login silently become a signup. This build separates the two flows:
+
+- The browser marks its intent with the `x-auth-flow` header (`sign-in` or `sign-up`).
+- `src/lib/auth/email-otp-account-guard.ts` runs before `/email-otp/send-verification-otp` and `/sign-in/email-otp`.
+- `sign-in` requires an existing user. An unknown address gets `ACCOUNT_NOT_FOUND` and a **Create an account** link; no code is sent.
+- `sign-up` requires a new address. An existing address gets `ACCOUNT_ALREADY_EXISTS` and a **Sign in** link; no code is sent.
+- Requests without the header default to `sign-in`, so omitting it cannot create an account.
+
+This is a deliberate tradeoff: the login screen now reveals whether an address is registered. That is the behavior this product wants, and it is documented rather than hidden. The check is a product-flow guard, not a security boundary; signup is public by design.
+
+---
+
+## Tech stack
 
 | Layer | Technology |
 |---|---|
-| Framework | Next.js 15 (App Router) |
-| Authentication | Better Auth v1 |
-| Database | Turso Cloud (LibSQL via Kysely) |
-| MFA | TOTP / RFC 6238 (Google Authenticator compatible) |
+| Framework | Next.js 15 (App Router, React 19) |
+| Authentication | Better Auth 1.7 |
+| Database | Turso Cloud (LibSQL) through Kysely |
+| Email | Resend |
+| MFA | TOTP through Better Auth's two-factor plugin |
 | Styling | Tailwind CSS v4 |
-| UI Components | Radix UI primitives |
-| Typography | DM Sans (Google Fonts) |
-| Images | Pexels API |
+| Primitives | Radix UI |
+| Typography | Inter and IBM Plex Mono via `next/font` |
+| Photography | Pexels API |
 | Language | TypeScript |
-
----
-
-## Authentication Flow
-
-```
-Sign Up → Email/Password → MFA Setup (scan QR) → Dashboard
-Sign In → Email/Password → MFA Verify (enter code) → Dashboard
-```
-
-1. **Sign Up**: User registers with name, email, and password
-2. **MFA Setup**: TOTP secret generated, QR code displayed for authenticator app
-3. **Sign In**: Email/password verified, then TOTP code required
-4. **Session**: JWT session issued by Better Auth, stored securely
 
 ---
 
 ## Prerequisites
 
-Before running this project, you need:
+- Node.js **20.9 or newer**
+- A Turso Cloud database ([app.turso.tech](https://app.turso.tech))
+- A Resend API key ([resend.com](https://resend.com))
+- Optional: a Pexels API key for the auth photograph
 
-### 1. Node.js
-- Version **18.17+** required (tested on Node 26)
+### Turso
 
-### 2. Turso Cloud Database
-- Create a free account at [https://app.turso.tech](https://app.turso.tech)
-- Create a new database
-- Obtain your **Database URL** and **Auth Token**:
-  ```bash
-  turso db show YOUR_DB_NAME --url
-  turso db tokens create YOUR_DB_NAME
-  ```
+```bash
+turso db create mfa-system
+turso db show mfa-system --url
+turso db tokens create mfa-system
+```
 
-### 3. Better Auth Secret
-Generate a cryptographically secure secret:
+Copy the URL and token into `.env.local`.
+
+### Better Auth secret
+
 ```bash
 openssl rand -base64 32
 ```
 
-### 4. Pexels API Key (optional)
-Already provided in `.env.example`. Used for background photography on auth pages.
+Use at least 32 characters. The server refuses to start without it.
 
 ---
 
 ## Setup
 
-### 1. Clone and install dependencies
-
 ```bash
 git clone https://github.com/aryanbatras/MFA-system.git
 cd MFA-system
 npm install
-```
-
-### 2. Configure environment variables
-
-Copy the example file and fill in your values:
-
-```bash
 cp .env.example .env.local
 ```
 
-Edit `.env.local`:
+Fill in `.env.local`:
 
 ```env
-# Better Auth Secret (generate with: openssl rand -base64 32)
-BETTER_AUTH_SECRET=your-secret-here-minimum-32-characters
-
-# App URL (change for production)
-NEXT_PUBLIC_APP_URL=http://localhost:3000
-
-# Turso Database
-TURSO_DATABASE_URL=libsql://your-database-name.turso.io
-TURSO_AUTH_TOKEN=your-turso-auth-token
-
-# Pexels API (provided)
-NEXT_PUBLIC_PEXELS_API_KEY=vquQw21KBZbpFePsBoLGrQp0btek4FGzwvJM9IP7bWvacaEW9WQ2hoFa
+BETTER_AUTH_SECRET=your-generated-secret
+NEXT_PUBLIC_APP_URL=http://localhost:3001
+TURSO_DATABASE_URL=libsql://your-database.turso.io
+TURSO_AUTH_TOKEN=your-turso-token
+RESEND_API_KEY=re_your_key
+EMAIL_FROM=MFA System <onboarding@resend.dev>
+PEXELS_API_KEY=your-pexels-key
 ```
 
-### 3. Run database migrations
-
-This creates the required tables in your Turso database:
+Run the migration:
 
 ```bash
 npm run migrate
 ```
 
-Tables created:
-- `user` — User accounts
-- `session` — Active sessions
-- `account` — Auth provider accounts
-- `verification` — Email/token verification
-- `twoFactor` — TOTP secrets and backup codes
-
-### 4. Start the development server
+Start the app:
 
 ```bash
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000)
+Open [http://localhost:3001](http://localhost:3001). The example uses port 3001 because port 3000 is often occupied by another local project. If you use port 3000, change `NEXT_PUBLIC_APP_URL` to match.
+
+### Local email without Resend
+
+If `RESEND_API_KEY` is empty and `NODE_ENV` is not `production`, the OTP is printed to the server console instead of being emailed. This is useful for local testing:
+
+```text
+[auth] sign-in OTP for you@example.com: 123456
+```
+
+In production, a missing `RESEND_API_KEY` is an error. The app does not silently fall back to console output.
+
+---
+
+## Resend test-domain limitation
+
+This is the most common setup problem.
+
+The default sender is:
+
+```env
+EMAIL_FROM=MFA System <onboarding@resend.dev>
+```
+
+Resend's `onboarding@resend.dev` test sender **only delivers to the email address that owns the Resend account**. It cannot deliver to arbitrary users until you verify a sending domain.
+
+For real users:
+
+1. Add and verify a domain in the Resend dashboard.
+2. Create a sender such as `MFA System <no-reply@yourdomain.com>`.
+3. Set `EMAIL_FROM` to that sender.
+4. Redeploy.
+
+If you test with `delivered@resend.dev`, Resend's test address, delivery succeeds but there is no inbox to read. Use the console fallback locally, or send to the Resend account owner's address.
 
 ---
 
 ## Routes
 
-| Route | Description |
-|---|---|
-| `/login` | Sign in with email + password |
-| `/signup` | Create a new account |
-| `/mfa-setup` | Configure TOTP authenticator (post signup) |
-| `/mfa-verify` | Enter TOTP code (post login when MFA enabled) |
-| `/dashboard` | Authenticated user dashboard |
-| `/api/auth/[...all]` | Better Auth API handler (all auth endpoints) |
+| Route | Access | Purpose |
+|---|---|---|
+| `/` | Public | Redirects to `/login` |
+| `/login` | Public | Email code sign-in |
+| `/signup` | Public | Email code account creation |
+| `/mfa-setup` | Signed in, no MFA | QR enrollment, TOTP confirmation, recovery codes |
+| `/mfa-verify` | Pending second factor | TOTP or recovery code challenge |
+| `/dashboard` | Signed in with MFA | Protected account and security page |
+| `/api/auth/[...all]` | Better Auth | All authentication endpoints |
+| `/api/auth/token` | Signed in | Short-lived JWT from the JWT plugin |
+| `/api/auth/jwks` | Public | JWKS for verifying those tokens |
 
 ---
 
-## MFA Setup Guide
+## Database
 
-After signing up:
+`npm run migrate` is idempotent. It creates or updates:
 
-1. Open **Google Authenticator**, **Authy**, **1Password**, or any TOTP app
-2. Tap **Add account** → **Scan QR code**
-3. Scan the QR code shown on the `/mfa-setup` page
-4. Enter the **6-digit code** to confirm setup
-5. Future logins will require this code
+| Table | Purpose |
+|---|---|
+| `user` | Accounts, email verification state, `twoFactorEnabled` |
+| `session` | Active sessions |
+| `account` | Better Auth provider accounts (no credential/password rows are created) |
+| `verification` | Email OTPs, two-factor challenges, attempt counters |
+| `twoFactor` | Encrypted TOTP secret, encrypted recovery codes, lockout state |
+| `rateLimit` | Durable per-IP, per-path request counters |
+| `jwks` | JWT signing keys |
 
-**If you lose access to your authenticator**, use the backup codes provided on setup (stored hashed in the database).
+The migration also backfills `twoFactor.verified = 1` for accounts that enabled TOTP before the `verified` column existed. This prevents the old "TOTP not enabled" failure for existing users.
+
+The legacy `emailOtp` table from the first prototype is left in place if it already exists. It is no longer read or written; Better Auth stores OTPs in `verification`.
+
+---
+
+## MFA setup guide
+
+1. Install Google Authenticator, 1Password, Authy, or any TOTP-compatible app.
+2. On `/mfa-setup`, select **Set up authenticator**.
+3. Scan the QR code. If the camera is unavailable, expand **Can't scan? Enter this key manually** and type the key.
+4. Enter the current six-digit code from the app.
+5. Save the ten recovery codes. They are shown once.
+
+Each recovery code works once. Store the downloaded text file offline. There is no password reset flow; recovery codes are the intended recovery path.
 
 ---
 
 ## Deployment
 
-### Vercel (recommended)
+### Vercel
 
 ```bash
-npm install -g vercel
 vercel --prod
 ```
 
-Set environment variables in the Vercel dashboard under **Settings → Environment Variables**.
+Set these environment variables in the Vercel project:
+
+- `BETTER_AUTH_SECRET`
+- `NEXT_PUBLIC_APP_URL` (for example `https://mfa-auth-systems.vercel.app`)
+- `TURSO_DATABASE_URL`
+- `TURSO_AUTH_TOKEN`
+- `RESEND_API_KEY`
+- `EMAIL_FROM`
+- `PEXELS_API_KEY`
+- Optional: `TRUSTED_ORIGINS`
+
+Run the migration once against the production database:
+
+```bash
+npm run migrate
+```
+
+`getAppUrl()` prefers the deployment's own Vercel URL when `VERCEL` is set, so a stale `NEXT_PUBLIC_APP_URL` cannot break cookie origins. Production uses `VERCEL_PROJECT_PRODUCTION_URL`; previews use `VERCEL_URL`. Set `NEXT_PUBLIC_APP_URL` correctly anyway so metadata and documentation links are accurate.
 
 ### Self-hosted
 
@@ -180,57 +316,127 @@ npm run build
 npm start
 ```
 
----
-
-## Environment Variables Reference
-
-| Variable | Required | Description |
-|---|---|---|
-| `BETTER_AUTH_SECRET` | Yes | 32+ char secret for signing sessions |
-| `NEXT_PUBLIC_APP_URL` | Yes | Full URL of your app (no trailing slash) |
-| `TURSO_DATABASE_URL` | Yes | LibSQL URL from Turso (`libsql://...`) |
-| `TURSO_AUTH_TOKEN` | Yes | Turso auth token |
-| `NEXT_PUBLIC_PEXELS_API_KEY` | No | Pexels API key for background images |
+Terminate TLS in front of the app. Production cookies are marked `Secure`.
 
 ---
 
-## Security Notes
+## Verification checklist
 
-- Passwords are hashed with **bcrypt** (via Better Auth)
-- TOTP secrets are stored **encrypted** in the database
-- Sessions use **HTTP-only cookies** (not localStorage)
-- HTTPS required in production — set `NEXT_PUBLIC_APP_URL` to your HTTPS domain
+Run through this after deploying:
 
----
+1. Sign up with a new address. Confirm there is no name or password field.
+2. Sign in with an address that is not in the database. Confirm no code is sent and the page says **No account exists for this email. Create an account to continue.**
+3. Sign up with an address that already has an account. Confirm no code is sent and the page says **An account already exists for this email. Sign in instead.**
+4. Confirm the email code arrives and the code expires after 10 minutes.
+5. Confirm `/mfa-setup` shows a QR code without asking for a password.
+6. Scan the QR code and confirm a TOTP code. Confirm the recovery codes are shown once.
+7. Confirm `/dashboard` loads only after MFA is active.
+8. Sign out. Sign in with the same address. Confirm the email code is followed by `/mfa-verify`.
+9. Confirm the dashboard is not reachable by visiting it directly without a session.
+10. Confirm a recovery code works once and is rejected the second time.
+11. Confirm `/api/auth/token` returns a JWT for a signed-in session and rejects an anonymous request.
+12. Confirm repeated OTP requests return HTTP 429 after the configured limit.
 
-## Project Structure
+Automated checks:
 
+```bash
+npm run typecheck
+npm run lint
+npm run build
 ```
+
+---
+
+## Troubleshooting
+
+### "TOTP not enabled" on `/mfa-setup`
+
+Run `npm run migrate`. The `twoFactor` table needs `verified`, `failedVerificationCount`, and `lockedUntil`, and existing verified accounts need the backfill.
+
+### The MFA setup page asks for a password
+
+This build does not contain a password field. If you see one, the deployment is serving an older build. Redeploy from the current `main` branch and confirm `allowPasswordless: true` is present in `src/lib/auth.ts`.
+
+### Email code never arrives
+
+- Check the Resend dashboard for delivery events.
+- If using `onboarding@resend.dev`, confirm the recipient is the Resend account owner.
+- For local development, leave `RESEND_API_KEY` empty and read the code from the server console.
+- Check the `EMAIL_FROM` value. It must be a verified sender.
+
+### Sign-in succeeds but the app returns to `/login`
+
+Check that `NEXT_PUBLIC_APP_URL` matches the browser origin. On Vercel, the app also accepts `VERCEL_PROJECT_PRODUCTION_URL` and `VERCEL_URL`. If you use a custom domain, add it to `TRUSTED_ORIGINS`.
+
+### HTTP 429
+
+Rate limits are intentional. Email code requests are limited to three per minute. Second-factor verification is limited to ten per minute per client, with a five-attempt cap per challenge. Wait for the window to reset.
+
+### Lost authenticator and recovery codes
+
+There is no automated account recovery in this scope. An operator must remove the `twoFactor` row and set `user.twoFactorEnabled = 0`, after which the user can enroll again. This is documented as a limitation rather than hidden behind an insecure reset flow.
+
+---
+
+## Project structure
+
+```text
 src/
 ├── app/
 │   ├── (auth)/
-│   │   ├── layout.tsx          # Split-screen auth layout
-│   │   ├── login/page.tsx      # Sign in page
-│   │   ├── signup/page.tsx     # Sign up page
-│   │   ├── mfa-setup/page.tsx  # TOTP setup with QR code
-│   │   └── mfa-verify/page.tsx # TOTP verification
-│   ├── api/auth/[...all]/
-│   │   └── route.ts            # Better Auth API handler
-│   ├── dashboard/page.tsx      # Authenticated dashboard
-│   ├── layout.tsx              # Root layout
-│   └── globals.css             # Global styles
+│   │   ├── layout.tsx              White form panel + Pexels photo panel
+│   │   ├── login/
+│   │   │   ├── page.tsx            Server gate + metadata
+│   │   │   └── login-form.tsx
+│   │   ├── signup/
+│   │   │   ├── page.tsx
+│   │   │   └── signup-form.tsx
+│   │   ├── mfa-setup/
+│   │   │   ├── page.tsx
+│   │   │   └── mfa-setup-form.tsx
+│   │   └── mfa-verify/
+│   │       ├── page.tsx
+│   │       └── mfa-verify-form.tsx
+│   ├── api/auth/[...all]/route.ts  Better Auth handler
+│   ├── dashboard/page.tsx          Protected account page
+│   ├── globals.css                 Tailwind v4 theme
+│   ├── icon.svg
+│   ├── layout.tsx                  Fonts, metadata, viewport
+│   └── page.tsx                    Redirect to /login
 ├── components/
-│   └── ui/
-│       ├── button.tsx
-│       ├── input.tsx
-│       └── label.tsx
+│   ├── auth/email-code-form.tsx    Shared login/signup flow
+│   ├── backup-codes.tsx
+│   ├── logo.tsx
+│   ├── sign-out-button.tsx
+│   └── ui/                         Button, input, label, alert, OTP, copy
 └── lib/
-    ├── auth.ts                 # Better Auth server config
-    ├── auth-client.ts          # Better Auth client config
-    └── utils.ts                # Utility functions
-scripts/
-└── migrate.mjs                 # Database migration script
+    ├── auth.ts                     Better Auth configuration
+    ├── auth/email-otp-account-guard.ts  Login/signup account checks
+    ├── auth/email-otp-two-factor.ts MFA enforcement hook
+    ├── auth-client.ts
+    ├── auth-errors.ts
+    ├── email.ts                    Resend sender + local fallback
+    ├── pexels.ts                   Photo fetch + fallback
+    ├── session.ts                  Server session helper
+    ├── url.ts                      Vercel-aware URLs and trusted origins
+    └── utils.ts
+scripts/migrate.mjs                 Idempotent Turso migration
 ```
+
+---
+
+## Scope and limitations
+
+This project deliberately covers signup, login, mandatory MFA enrollment, MFA verification, and the protected dashboard. It does not include:
+
+- Password reset (there are no passwords)
+- Passkeys or WebAuthn
+- Social login
+- Account deletion or email change
+- A recovery-code regeneration screen
+- An admin console
+
+The JWT plugin is configured so a downstream API can verify short-lived tokens. No JWT UI is exposed in this scope.
 
 ---
 
