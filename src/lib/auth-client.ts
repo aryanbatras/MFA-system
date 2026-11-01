@@ -1,5 +1,5 @@
 import { createAuthClient } from "better-auth/react";
-import { twoFactorClient } from "better-auth/client/plugins";
+import { twoFactorClient, emailOTPClient } from "better-auth/client/plugins";
 
 export const authClient = createAuthClient({
   baseURL:
@@ -7,6 +7,7 @@ export const authClient = createAuthClient({
       ? window.location.origin
       : process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
   plugins: [
+    emailOTPClient(),
     twoFactorClient({
       twoFactorPage: "/mfa-verify",
     }),

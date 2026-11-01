@@ -64,6 +64,16 @@ const migrations = [
     "updatedAt" INTEGER
   )`,
 
+  // Email OTP table
+  `CREATE TABLE IF NOT EXISTS "emailOtp" (
+    "id" TEXT PRIMARY KEY,
+    "email" TEXT NOT NULL,
+    "otp" TEXT NOT NULL,
+    "createdAt" INTEGER NOT NULL,
+    "expiresAt" INTEGER NOT NULL,
+    "type" TEXT NOT NULL DEFAULT 'sign-in'
+  )`,
+
   // Two factor table (for twoFactor plugin — Better Auth v1.7)
   `CREATE TABLE IF NOT EXISTS "twoFactor" (
     "id" TEXT PRIMARY KEY,
