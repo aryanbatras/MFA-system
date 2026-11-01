@@ -1,13 +1,18 @@
 {
   "name": "mfa-system",
   "version": "1.0.0",
-  "description": "Enterprise Multi-Factor Authentication — Next.js 15, Better Auth, Turso Cloud",
+  "private": true,
+  "description": "Passwordless MFA with email one-time codes and TOTP — Next.js, Better Auth, Turso Cloud",
   "type": "module",
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
     "migrate": "node scripts/migrate.mjs"
   },
   "repository": {
@@ -27,7 +32,6 @@
     "kysely-libsql": "^0.7.1",
     "lucide-react": "^1.66.0",
     "next": "^15.5.28",
-    "otpauth": "^9.5.2",
     "qrcode": "^1.5.4",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
@@ -36,6 +40,7 @@
     "tailwindcss": "^4.3.3"
   },
   "devDependencies": {
+    "@eslint/eslintrc": "^3.3.1",
     "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^22.0.0",
     "@types/qrcode": "^1.5.6",
@@ -43,6 +48,7 @@
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
     "eslint": "^9.0.0",
+    "eslint-config-next": "^15.5.28",
     "postcss": "^8.5.32",
     "typescript": "^5.8.3"
   }

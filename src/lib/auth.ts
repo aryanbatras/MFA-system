@@ -2,61 +2,126 @@ import { betterAuth } from "better-auth";
 import { kyselyAdapter } from "@better-auth/kysely-adapter";
 import { Kysely } from "kysely";
 import { LibsqlDialect } from "kysely-libsql";
-import { twoFactor, emailOTP } from "better-auth/plugins";
-import { Resend } from "resend";
+import { emailOTP, jwt, twoFactor } from "better-auth/plugins";
+import { emailOtpAccountGuard } from "@/lib/auth/email-otp-account-guard";
+import { emailOtpTwoFactorChallenge } from "@/lib/auth/email-otp-two-factor";
+import { sendOtpEmail } from "@/lib/email";
+import { getAppUrl, getTrustedOrigins } from "@/lib/url";
+
+const tursoUrl = process.env.TURSO_DATABASE_URL;
+const tursoToken = process.env.TURSO_AUTH_TOKEN;
+const secret = process.env.BETTER_AUTH_SECRET;
+
+if (!tursoUrl) {
+  throw new Error("TURSO_DATABASE_URL is not set. Add it to .env.local.");
+}
+
+if (!secret || secret.length < 32) {
+  throw new Error(
+    "BETTER_AUTH_SECRET must be set to at least 32 characters. Generate one with `openssl rand -base64 32`.",
+  );
+}
 
 const db = new Kysely({
   dialect: new LibsqlDialect({
-    url: process.env.TURSO_DATABASE_URL!,
-    authToken: process.env.TURSO_AUTH_TOKEN!,
+    url: tursoUrl,
+    authToken: tursoToken,
   }),
 });
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+const appUrl = getAppUrl();
 
 export const auth = betterAuth({
+  appName: "MFA System",
+  baseURL: appUrl,
+  secret,
   database: kyselyAdapter(db, { type: "sqlite" }),
+
+  // Passwordless only. There is no credential/password sign-in path.
+  emailAndPassword: {
+    enabled: false,
+  },
+
+  session: {
+    expiresIn: 60 * 60 * 24 * 7, // 7 days
+    updateAge: 60 * 60 * 24, // refresh the expiry once per day
+    cookieCache: {
+      enabled: true,
+      maxAge: 5 * 60,
+    },
+  },
+
+  advanced: {
+    useSecureCookies: process.env.NODE_ENV === "production",
+    defaultCookieAttributes: {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      path: "/",
+    },
+  },
+
+  // Durable, database-backed rate limiting works across serverless instances.
+  rateLimit: {
+    enabled: true,
+    storage: "database",
+    window: 60,
+    max: 100,
+    customRules: {
+      "/two-factor/enable": { window: 60, max: 5 },
+      "/two-factor/verify-totp": { window: 60, max: 10 },
+      "/two-factor/verify-backup-code": { window: 60, max: 10 },
+    },
+  },
+
   plugins: [
     emailOTP({
-      async sendVerificationOTP({ email, otp, type }) {
-        const subjects: Record<string, string> = {
-          "sign-in": "Your sign-in code",
-          "email-verification": "Verify your email",
-          "forget-password": "Your reset code",
-        };
-        await resend.emails.send({
-          from: "onboarding@resend.dev",
-          to: email,
-          subject: subjects[type] ?? "Your verification code",
-          html: `
-            <div style="font-family:-apple-system,sans-serif;max-width:480px;margin:0 auto;padding:40px 24px;color:#09090b;">
-              <p style="font-size:11px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#a1a1aa;margin:0 0 24px;">MFA System</p>
-              <h1 style="font-size:28px;font-weight:600;letter-spacing:-0.03em;margin:0 0 8px;line-height:1.15;">${subjects[type] ?? "Your code"}</h1>
-              <p style="font-size:14px;color:#71717a;margin:0 0 32px;line-height:1.5;">Use the code below to continue. It expires in 10 minutes.</p>
-              <div style="background:#fafafa;border:1px solid #e4e4e7;padding:24px;text-align:center;margin-bottom:32px;">
-                <span style="font-family:monospace;font-size:36px;font-weight:600;letter-spacing:0.2em;color:#09090b;">${otp}</span>
-              </div>
-              <p style="font-size:12px;color:#a1a1aa;margin:0;">If you didn't request this, you can safely ignore this email.</p>
-            </div>
-          `,
-        });
-      },
-      expiresIn: 600, // 10 minutes
+      expiresIn: 10 * 60,
       otpLength: 6,
+      allowedAttempts: 5,
+      // The plaintext code is never persisted.
+      storeOTP: "hashed",
+      rateLimit: { window: 60, max: 3 },
+      async sendVerificationOTP({ email, otp, type }) {
+        await sendOtpEmail({ email, otp, type });
+      },
     }),
     twoFactor({
       issuer: "MFA System",
-      totpOptions: { digits: 6, period: 30 },
+      allowPasswordless: true,
+      twoFactorCookieMaxAge: 10 * 60,
+      totpOptions: {
+        digits: 6,
+        period: 30,
+      },
+      backupCodeOptions: {
+        amount: 10,
+        length: 10,
+        storeBackupCodes: "encrypted",
+      },
+      accountLockout: {
+        enabled: true,
+        maxFailedAttempts: 10,
+        durationSeconds: 15 * 60,
+      },
+    }),
+    // Login and signup share the email-OTP endpoints. This guard keeps a
+    // mistyped login from silently creating a new account, and points an
+    // existing address on the signup screen back to sign-in.
+    emailOtpAccountGuard(),
+    // Email OTP signs the user in before the built-in two-factor hook can run.
+    // This plugin closes that gap and turns every OTP sign-in into a TOTP challenge.
+    emailOtpTwoFactorChallenge(),
+    jwt({
+      jwt: {
+        issuer: appUrl,
+        audience: appUrl,
+        expirationTime: "15m",
+      },
     }),
   ],
-  trustedOrigins: [
-    process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "https://mfa-auth-systems.vercel.app",
-  ],
-  secret: process.env.BETTER_AUTH_SECRET!,
-  baseURL: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
+
+  trustedOrigins: getTrustedOrigins(appUrl),
 });
 
 export type Session = typeof auth.$Infer.Session;
