@@ -2,22 +2,18 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import Image from "next/image";
 import { authClient } from "@/lib/auth-client";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 
 export default function MfaSetupPage() {
   const router = useRouter();
   const [qrCode, setQrCode] = useState<string | null>(null);
-  const [totpUri, setTotpUri] = useState<string | null>(null);
   const [secret, setSecret] = useState<string | null>(null);
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [step, setStep] = useState<"setup" | "verify">("setup");
+  const [step, setStep] = useState<"scan" | "verify">("scan");
   const [initializing, setInitializing] = useState(true);
+  const [initError, setInitError] = useState<string | null>(null);
 
   useEffect(() => {
     initializeMfa();
@@ -26,31 +22,29 @@ export default function MfaSetupPage() {
   async function initializeMfa() {
     try {
       const result = await authClient.twoFactor.getTotpUri({
-        password: "", // Better auth handles session
+        password: "",
       });
 
-      if (result.data) {
-        setTotpUri(result.data.totpURI);
-
-        // Generate QR code as data URL
-        const QRCode = (await import("qrcode")).default;
-        const qrDataUrl = await QRCode.toDataURL(result.data.totpURI, {
-          width: 200,
-          margin: 2,
-          color: {
-            dark: "#18181b",
-            light: "#ffffff",
-          },
-        });
-        setQrCode(qrDataUrl);
-
-        // Extract secret from URI
-        const match = result.data.totpURI.match(/secret=([A-Z2-7]+)/i);
-        if (match) setSecret(match[1]);
+      if (result.error || !result.data) {
+        setInitError("Could not load MFA setup. Please sign in again.");
+        setInitializing(false);
+        return;
       }
-    } catch (err) {
-      // If no active session, redirect to login
-      router.push("/login");
+
+      const uri = result.data.totpURI;
+
+      const QRCode = (await import("qrcode")).default;
+      const qrDataUrl = await QRCode.toDataURL(uri, {
+        width: 180,
+        margin: 1,
+        color: { dark: "#09090b", light: "#ffffff" },
+      });
+      setQrCode(qrDataUrl);
+
+      const match = uri.match(/secret=([A-Z2-7]+)/i);
+      if (match) setSecret(match[1]);
+    } catch {
+      setInitError("Could not load MFA setup. Please sign in again.");
     } finally {
       setInitializing(false);
     }
@@ -67,134 +61,216 @@ export default function MfaSetupPage() {
       });
 
       if (result.error) {
-        setError("Invalid code. Please check your authenticator app and try again.");
+        setError("Invalid code. Check your authenticator app.");
         setLoading(false);
         return;
       }
 
       router.push("/dashboard");
-    } catch (err) {
+    } catch {
       setError("Verification failed. Please try again.");
       setLoading(false);
     }
   }
 
-  async function handleSkip() {
-    router.push("/dashboard");
-  }
+  const sLabel: React.CSSProperties = { fontSize: "11px", fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "#a1a1aa", marginBottom: "8px" };
 
   if (initializing) {
     return (
-      <div className="w-full flex items-center justify-center py-16">
-        <div className="text-[14px] text-zinc-400">Loading...</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "48px 0" }}>
+        <p style={{ fontSize: "14px", color: "#a1a1aa" }}>Setting up authenticator...</p>
+      </div>
+    );
+  }
+
+  if (initError) {
+    return (
+      <div>
+        <p style={{ fontSize: "14px", color: "#dc2626", marginBottom: "16px" }}>{initError}</p>
+        <button
+          onClick={() => router.push("/login")}
+          style={{ fontSize: "14px", color: "#09090b", textDecoration: "underline", background: "none", border: "none", cursor: "pointer", padding: 0 }}
+        >
+          Back to sign in
+        </button>
+      </div>
+    );
+  }
+
+  if (step === "scan") {
+    return (
+      <div>
+        <p style={sLabel}>Step 2 of 2</p>
+        <h1 style={{ fontSize: "28px", fontWeight: 600, letterSpacing: "-0.03em", lineHeight: 1.15, color: "#09090b", marginBottom: "8px" }}>
+          Set up authenticator
+        </h1>
+        <p style={{ fontSize: "14px", color: "#71717a", lineHeight: 1.5, marginBottom: "28px" }}>
+          Open Google Authenticator and scan this QR code.
+        </p>
+
+        {qrCode && (
+          <div style={{ marginBottom: "24px" }}>
+            <div style={{ display: "inline-block", border: "1px solid #e4e4e7", padding: "12px", backgroundColor: "#fff" }}>
+              <img src={qrCode} alt="TOTP QR Code" width={156} height={156} style={{ display: "block" }} />
+            </div>
+
+            {secret && (
+              <div style={{ marginTop: "16px" }}>
+                <p style={{ fontSize: "12px", color: "#a1a1aa", marginBottom: "6px" }}>
+                  Or enter the key manually:
+                </p>
+                <code style={{
+                  display: "block",
+                  fontFamily: "monospace",
+                  fontSize: "13px",
+                  backgroundColor: "#fafafa",
+                  border: "1px solid #e4e4e7",
+                  padding: "8px 12px",
+                  color: "#3f3f46",
+                  letterSpacing: "0.1em",
+                  wordBreak: "break-all",
+                }}>
+                  {secret.match(/.{1,4}/g)?.join(" ") || secret}
+                </code>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          <button
+            onClick={() => setStep("verify")}
+            style={{
+              width: "100%",
+              height: "42px",
+              fontSize: "14px",
+              fontWeight: 500,
+              color: "#fff",
+              backgroundColor: "#09090b",
+              border: "none",
+              borderRadius: 0,
+              cursor: "pointer",
+              letterSpacing: "-0.01em",
+              fontFamily: "inherit",
+            }}
+          >
+            I&apos;ve scanned the code
+          </button>
+          <button
+            onClick={() => router.push("/dashboard")}
+            style={{
+              width: "100%",
+              height: "42px",
+              fontSize: "13px",
+              fontWeight: 400,
+              color: "#a1a1aa",
+              backgroundColor: "transparent",
+              border: "1px solid #f4f4f5",
+              borderRadius: 0,
+              cursor: "pointer",
+              fontFamily: "inherit",
+            }}
+          >
+            Skip for now
+          </button>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="w-full">
-      {step === "setup" ? (
-        <>
-          <div className="mb-8">
-            <p className="text-[11px] font-semibold tracking-[0.1em] uppercase text-zinc-400 mb-2">
-              Step 2 of 2
-            </p>
-            <h1 className="text-[32px] font-semibold tracking-[-0.03em] text-zinc-900 leading-[1.1]">
-              Set up authenticator
-            </h1>
-            <p className="mt-2 text-[15px] text-zinc-500">
-              Scan the QR code with Google Authenticator or any TOTP app.
-            </p>
+    <div>
+      <button
+        onClick={() => setStep("scan")}
+        style={{ fontSize: "13px", color: "#a1a1aa", background: "none", border: "none", cursor: "pointer", padding: 0, marginBottom: "16px" }}
+      >
+        ← Back
+      </button>
+
+      <h1 style={{ fontSize: "28px", fontWeight: 600, letterSpacing: "-0.03em", lineHeight: 1.15, color: "#09090b", marginBottom: "8px" }}>
+        Verify code
+      </h1>
+      <p style={{ fontSize: "14px", color: "#71717a", lineHeight: 1.5, marginBottom: "28px" }}>
+        Enter the 6-digit code from your authenticator app.
+      </p>
+
+      <form onSubmit={handleVerify}>
+        <div style={{ marginBottom: "20px" }}>
+          <label htmlFor="code" style={{ display: "block", fontSize: "13px", fontWeight: 500, color: "#3f3f46", marginBottom: "6px" }}>
+            Authentication code
+          </label>
+          <input
+            id="code"
+            type="text"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            placeholder="000000"
+            value={code}
+            onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+            maxLength={6}
+            required
+            disabled={loading}
+            autoFocus
+            style={{
+              width: "100%",
+              height: "52px",
+              padding: "0 16px",
+              fontSize: "24px",
+              fontFamily: "monospace",
+              color: "#09090b",
+              backgroundColor: "#fff",
+              border: "1px solid #e4e4e7",
+              borderRadius: 0,
+              outline: "none",
+              boxSizing: "border-box",
+              letterSpacing: "0.25em",
+              textAlign: "center",
+            }}
+            onFocus={(e) => (e.target.style.borderColor = "#09090b")}
+            onBlur={(e) => (e.target.style.borderColor = "#e4e4e7")}
+          />
+        </div>
+
+        {error && (
+          <div style={{ marginBottom: "16px", padding: "10px 12px", fontSize: "13px", color: "#dc2626", backgroundColor: "#fef2f2", border: "1px solid #fecaca" }}>
+            {error}
           </div>
+        )}
 
-          {qrCode && (
-            <div className="mb-8">
-              <div className="inline-block border border-zinc-200 p-4 bg-white">
-                <img src={qrCode} alt="TOTP QR Code" width={160} height={160} />
-              </div>
+        <button
+          type="submit"
+          disabled={loading || code.length !== 6}
+          style={{
+            width: "100%",
+            height: "42px",
+            fontSize: "14px",
+            fontWeight: 500,
+            color: "#fff",
+            backgroundColor: (loading || code.length !== 6) ? "#a1a1aa" : "#09090b",
+            border: "none",
+            borderRadius: 0,
+            cursor: (loading || code.length !== 6) ? "not-allowed" : "pointer",
+            letterSpacing: "-0.01em",
+            fontFamily: "inherit",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: "8px",
+          }}
+        >
+          {loading ? (
+            <>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style={{ animation: "spin 1s linear infinite" }}>
+                <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" strokeOpacity="0.25" />
+                <path d="M4 12a8 8 0 018-8" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
+              </svg>
+              Verifying...
+            </>
+          ) : "Confirm and activate"}
+        </button>
+      </form>
 
-              {secret && (
-                <div className="mt-4">
-                  <p className="text-[12px] text-zinc-500 mb-1.5">
-                    Or enter the setup key manually:
-                  </p>
-                  <code className="block font-mono text-[13px] bg-zinc-50 border border-zinc-200 px-3 py-2 text-zinc-700 tracking-[0.1em] break-all">
-                    {secret.match(/.{1,4}/g)?.join(" ") || secret}
-                  </code>
-                </div>
-              )}
-            </div>
-          )}
-
-          <div className="space-y-3">
-            <Button
-              className="w-full"
-              size="lg"
-              onClick={() => setStep("verify")}
-            >
-              I&apos;ve scanned the QR code
-            </Button>
-            <Button
-              variant="ghost"
-              className="w-full text-zinc-400 text-[13px]"
-              onClick={handleSkip}
-            >
-              Skip for now
-            </Button>
-          </div>
-        </>
-      ) : (
-        <>
-          <div className="mb-8">
-            <button
-              onClick={() => setStep("setup")}
-              className="text-[13px] text-zinc-400 mb-4 flex items-center gap-1"
-            >
-              &larr; Back
-            </button>
-            <h1 className="text-[32px] font-semibold tracking-[-0.03em] text-zinc-900 leading-[1.1]">
-              Verify setup
-            </h1>
-            <p className="mt-2 text-[15px] text-zinc-500">
-              Enter the 6-digit code from your authenticator app to confirm setup.
-            </p>
-          </div>
-
-          <form onSubmit={handleVerify} className="space-y-5">
-            <div className="space-y-1.5">
-              <Label htmlFor="code">Authentication code</Label>
-              <Input
-                id="code"
-                type="text"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                placeholder="000 000"
-                value={code}
-                onChange={(e) => setCode(e.target.value.replace(/[^0-9]/g, ""))}
-                maxLength={6}
-                required
-                disabled={loading}
-                className="tracking-[0.2em] text-center text-[20px] font-mono"
-              />
-            </div>
-
-            {error && (
-              <p className="text-[13px] text-red-600 bg-red-50 border border-red-100 px-3 py-2.5">
-                {error}
-              </p>
-            )}
-
-            <Button
-              type="submit"
-              className="w-full"
-              loading={loading}
-              size="lg"
-            >
-              Confirm and activate
-            </Button>
-          </form>
-        </>
-      )}
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 }
