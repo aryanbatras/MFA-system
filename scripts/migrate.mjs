@@ -64,13 +64,23 @@ const migrations = [
     "updatedAt" INTEGER
   )`,
 
-  // Two factor table (for twoFactor plugin)
+  // Two factor table (for twoFactor plugin — Better Auth v1.7)
   `CREATE TABLE IF NOT EXISTS "twoFactor" (
     "id" TEXT PRIMARY KEY,
     "secret" TEXT NOT NULL,
     "backupCodes" TEXT NOT NULL,
-    "userId" TEXT NOT NULL REFERENCES "user"("id") ON DELETE CASCADE
+    "userId" TEXT NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
+    "verified" INTEGER NOT NULL DEFAULT 0,
+    "failedVerificationCount" INTEGER NOT NULL DEFAULT 0,
+    "lockedUntil" INTEGER
   )`,
+];
+
+// Column additions for existing tables (idempotent — SQLite ignores if already exists via try/catch)
+const alterations = [
+  `ALTER TABLE "twoFactor" ADD COLUMN "verified" INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE "twoFactor" ADD COLUMN "failedVerificationCount" INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE "twoFactor" ADD COLUMN "lockedUntil" INTEGER`,
 ];
 
 console.log("Running database migrations...");
@@ -83,6 +93,19 @@ for (const sql of migrations) {
   } catch (err) {
     console.error(`  ✗ Migration failed:`, err.message);
     process.exit(1);
+  }
+}
+
+console.log("Applying column updates...");
+for (const sql of alterations) {
+  try {
+    await db.execute(sql);
+    const col = sql.match(/ADD COLUMN "([^"]+)"/)?.[1];
+    console.log(`  ✓ Column "${col}" added`);
+  } catch (err) {
+    // Column already exists — that's fine
+    const col = sql.match(/ADD COLUMN "([^"]+)"/)?.[1];
+    console.log(`  ~ Column "${col}" already exists`);
   }
 }
 
