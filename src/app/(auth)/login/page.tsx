@@ -19,56 +19,91 @@ const btnS = (disabled: boolean): React.CSSProperties => ({
   display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
 });
 
+const Spinner = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style={{ animation: "spin 1s linear infinite" }}>
+    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" strokeOpacity="0.25" />
+    <path d="M4 12a8 8 0 018-8" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
+  </svg>
+);
+
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [otp, setOtp] = useState("");
+  // email → check account exists
+  // otp   → enter the email OTP code (first factor)
+  //         if TOTP is enabled, Better Auth auto-redirects to /mfa-verify (second factor)
   const [step, setStep] = useState<"email" | "otp">("email");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [resending, setResending] = useState(false);
 
-  async function handleSendOtp(e: React.FormEvent) {
+  // Step 1: Check account exists, then send OTP
+  async function handleEmailSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setLoading(true);
+
     try {
+      // Check account exists first
+      const res = await fetch("/api/user/exists", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim() }),
+      });
+      const { exists } = await res.json();
+
+      if (!exists) {
+        setError("No account found for this email. Please sign up first.");
+        setLoading(false);
+        return;
+      }
+
+      // Account exists — send OTP
       const result = await authClient.emailOtp.sendVerificationOtp({
         email: email.trim(),
         type: "sign-in",
       });
+
       if (result.error) {
         setError(result.error.message || "Failed to send code. Try again.");
         setLoading(false);
         return;
       }
+
       setStep("otp");
     } catch {
-      setError("Could not send code. Please try again.");
+      setError("Unable to connect. Please try again.");
     } finally {
       setLoading(false);
     }
   }
 
-  async function handleVerifyOtp(e: React.FormEvent) {
+  // Step 2: Verify OTP — if TOTP is enabled, twoFactorClient redirects to /mfa-verify automatically
+  async function handleOtpSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setLoading(true);
+
     try {
       const result = await authClient.signIn.emailOtp({
         email: email.trim(),
         otp: otp.trim(),
+        // twoFactorClient plugin intercepts here and redirects to /mfa-verify if TOTP enabled
+        fetchOptions: {
+          onSuccess: () => {
+            router.push("/dashboard");
+            router.refresh();
+          },
+        },
       });
-      if (result.error) {
+
+      if (result?.error) {
         setError(result.error.message || "Invalid or expired code.");
         setLoading(false);
-        return;
       }
-      router.push("/dashboard");
-      router.refresh();
     } catch {
       setError("Verification failed. Please try again.");
-    } finally {
       setLoading(false);
     }
   }
@@ -85,13 +120,6 @@ export default function LoginPage() {
     }
   }
 
-  const Spinner = () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style={{ animation: "spin 1s linear infinite" }}>
-      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" strokeOpacity="0.25" />
-      <path d="M4 12a8 8 0 018-8" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
-    </svg>
-  );
-
   if (step === "email") {
     return (
       <div>
@@ -99,10 +127,10 @@ export default function LoginPage() {
           Sign in
         </h1>
         <p style={{ fontSize: "14px", color: "#71717a", lineHeight: 1.5, marginBottom: "28px" }}>
-          Enter your email and we&apos;ll send you a sign-in code.
+          Enter your email to continue.
         </p>
 
-        <form onSubmit={handleSendOtp}>
+        <form onSubmit={handleEmailSubmit}>
           <div style={{ marginBottom: "20px" }}>
             <label htmlFor="email" style={{ display: "block", fontSize: "13px", fontWeight: 500, color: "#3f3f46", marginBottom: "6px" }}>
               Email address
@@ -126,7 +154,7 @@ export default function LoginPage() {
           )}
 
           <button type="submit" disabled={loading || !email} style={btnS(loading || !email)}>
-            {loading ? <><Spinner /> Sending code...</> : "Send code"}
+            {loading ? <><Spinner /> Checking...</> : "Continue"}
           </button>
         </form>
 
@@ -137,9 +165,9 @@ export default function LoginPage() {
         </div>
 
         <p style={{ textAlign: "center", fontSize: "13px", color: "#71717a" }}>
-          New here?{" "}
+          No account?{" "}
           <Link href="/signup" style={{ color: "#09090b", fontWeight: 500, textDecoration: "underline", textUnderlineOffset: "3px" }}>
-            Create an account
+            Create one
           </Link>
         </p>
 
@@ -148,6 +176,7 @@ export default function LoginPage() {
     );
   }
 
+  // OTP entry step
   return (
     <div>
       <button
@@ -161,13 +190,13 @@ export default function LoginPage() {
         Check your email
       </h1>
       <p style={{ fontSize: "14px", color: "#71717a", lineHeight: 1.5, marginBottom: "6px" }}>
-        We sent a 6-digit code to
+        We sent a sign-in code to
       </p>
       <p style={{ fontSize: "14px", fontWeight: 600, color: "#09090b", marginBottom: "28px" }}>
         {email}
       </p>
 
-      <form onSubmit={handleVerifyOtp}>
+      <form onSubmit={handleOtpSubmit}>
         <div style={{ marginBottom: "20px" }}>
           <label htmlFor="otp" style={{ display: "block", fontSize: "13px", fontWeight: 500, color: "#3f3f46", marginBottom: "6px" }}>
             Verification code
@@ -182,7 +211,9 @@ export default function LoginPage() {
             onFocus={(e) => (e.target.style.borderColor = "#09090b")}
             onBlur={(e) => (e.target.style.borderColor = "#e4e4e7")}
           />
-          <p style={{ marginTop: "6px", fontSize: "12px", color: "#a1a1aa" }}>Code expires in 10 minutes.</p>
+          <p style={{ marginTop: "6px", fontSize: "12px", color: "#a1a1aa" }}>
+            Code expires in 10 minutes. After verifying, you&apos;ll be asked for your authenticator code.
+          </p>
         </div>
 
         {error && (
@@ -198,11 +229,8 @@ export default function LoginPage() {
 
       <p style={{ marginTop: "16px", textAlign: "center", fontSize: "13px", color: "#71717a" }}>
         Didn&apos;t receive it?{" "}
-        <button
-          onClick={handleResend}
-          disabled={resending}
-          style={{ color: "#09090b", fontWeight: 500, textDecoration: "underline", textUnderlineOffset: "3px", background: "none", border: "none", cursor: resending ? "not-allowed" : "pointer", fontSize: "13px", fontFamily: "inherit", padding: 0 }}
-        >
+        <button onClick={handleResend} disabled={resending}
+          style={{ color: "#09090b", fontWeight: 500, textDecoration: "underline", textUnderlineOffset: "3px", background: "none", border: "none", cursor: resending ? "not-allowed" : "pointer", fontSize: "13px", fontFamily: "inherit", padding: 0 }}>
           {resending ? "Sending..." : "Resend code"}
         </button>
       </p>
