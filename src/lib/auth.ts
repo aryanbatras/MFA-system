@@ -43,6 +43,7 @@ export const auth = betterAuth({
     process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
     "http://localhost:3000",
     "http://localhost:3001",
+    "https://mfa-auth-systems.vercel.app",
   ],
   secret: process.env.BETTER_AUTH_SECRET!,
   baseURL: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",

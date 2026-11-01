@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { authClient } from "@/lib/auth-client";
 
@@ -9,30 +9,34 @@ export default function MfaSetupPage() {
   const [qrCode, setQrCode] = useState<string | null>(null);
   const [secret, setSecret] = useState<string | null>(null);
   const [code, setCode] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [step, setStep] = useState<"scan" | "verify">("scan");
-  const [initializing, setInitializing] = useState(true);
-  const [initError, setInitError] = useState<string | null>(null);
+  const [step, setStep] = useState<"password" | "scan" | "verify">("password");
 
-  useEffect(() => {
-    initializeMfa();
-  }, []);
+  async function handleEnable(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
 
-  async function initializeMfa() {
     try {
-      const result = await authClient.twoFactor.getTotpUri({
-        password: "",
-      });
+      // enable() generates the TOTP secret and returns the URI + backup codes
+      const result = await authClient.twoFactor.enable({ password });
 
       if (result.error || !result.data) {
-        setInitError("Could not load MFA setup. Please sign in again.");
-        setInitializing(false);
+        setError(result.error?.message || "Failed to enable MFA. Check your password.");
+        setLoading(false);
         return;
       }
 
-      const uri = result.data.totpURI;
+      const uri = (result.data as { totpURI?: string }).totpURI;
+      if (!uri) {
+        setError("No TOTP URI returned. Please try again.");
+        setLoading(false);
+        return;
+      }
 
+      // Generate QR code
       const QRCode = (await import("qrcode")).default;
       const qrDataUrl = await QRCode.toDataURL(uri, {
         width: 180,
@@ -43,10 +47,12 @@ export default function MfaSetupPage() {
 
       const match = uri.match(/secret=([A-Z2-7]+)/i);
       if (match) setSecret(match[1]);
+
+      setStep("scan");
     } catch {
-      setInitError("Could not load MFA setup. Please sign in again.");
+      setError("Something went wrong. Please try again.");
     } finally {
-      setInitializing(false);
+      setLoading(false);
     }
   }
 
@@ -73,39 +79,95 @@ export default function MfaSetupPage() {
     }
   }
 
-  const sLabel: React.CSSProperties = { fontSize: "11px", fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "#a1a1aa", marginBottom: "8px" };
+  const inputS: React.CSSProperties = {
+    width: "100%", height: "42px", padding: "0 12px", fontSize: "14px",
+    color: "#09090b", backgroundColor: "#fff", border: "1px solid #e4e4e7",
+    borderRadius: 0, outline: "none", boxSizing: "border-box",
+    letterSpacing: "-0.01em", fontFamily: "inherit",
+  };
+  const btnS = (disabled: boolean): React.CSSProperties => ({
+    width: "100%", height: "42px", fontSize: "14px", fontWeight: 500,
+    color: "#fff", backgroundColor: disabled ? "#a1a1aa" : "#09090b",
+    border: "none", borderRadius: 0, cursor: disabled ? "not-allowed" : "pointer",
+    letterSpacing: "-0.01em", fontFamily: "inherit",
+    display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+  });
 
-  if (initializing) {
-    return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "48px 0" }}>
-        <p style={{ fontSize: "14px", color: "#a1a1aa" }}>Setting up authenticator...</p>
-      </div>
-    );
-  }
-
-  if (initError) {
-    return (
-      <div>
-        <p style={{ fontSize: "14px", color: "#dc2626", marginBottom: "16px" }}>{initError}</p>
-        <button
-          onClick={() => router.push("/login")}
-          style={{ fontSize: "14px", color: "#09090b", textDecoration: "underline", background: "none", border: "none", cursor: "pointer", padding: 0 }}
-        >
-          Back to sign in
-        </button>
-      </div>
-    );
-  }
-
-  if (step === "scan") {
+  // Step 1: Ask for password to enable MFA
+  if (step === "password") {
     return (
       <div>
-        <p style={sLabel}>Step 2 of 2</p>
+        <p style={{ fontSize: "11px", fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "#a1a1aa", marginBottom: "8px" }}>
+          Step 2 of 2
+        </p>
         <h1 style={{ fontSize: "28px", fontWeight: 600, letterSpacing: "-0.03em", lineHeight: 1.15, color: "#09090b", marginBottom: "8px" }}>
           Set up authenticator
         </h1>
         <p style={{ fontSize: "14px", color: "#71717a", lineHeight: 1.5, marginBottom: "28px" }}>
-          Open Google Authenticator and scan this QR code.
+          Confirm your password to generate your authenticator QR code.
+        </p>
+
+        <form onSubmit={handleEnable}>
+          <div style={{ marginBottom: "20px" }}>
+            <label htmlFor="password" style={{ display: "block", fontSize: "13px", fontWeight: 500, color: "#3f3f46", marginBottom: "6px" }}>
+              Current password
+            </label>
+            <input
+              id="password"
+              type="password"
+              autoComplete="current-password"
+              placeholder="••••••••"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              autoFocus
+              disabled={loading}
+              style={inputS}
+              onFocus={(e) => (e.target.style.borderColor = "#09090b")}
+              onBlur={(e) => (e.target.style.borderColor = "#e4e4e7")}
+            />
+          </div>
+
+          {error && (
+            <div style={{ marginBottom: "16px", padding: "10px 12px", fontSize: "13px", color: "#dc2626", backgroundColor: "#fef2f2", border: "1px solid #fecaca" }}>
+              {error}
+            </div>
+          )}
+
+          <button type="submit" disabled={loading || !password} style={btnS(loading || !password)}>
+            {loading ? (
+              <>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style={{ animation: "spin 1s linear infinite" }}>
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" strokeOpacity="0.25" />
+                  <path d="M4 12a8 8 0 018-8" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
+                </svg>
+                Generating QR code...
+              </>
+            ) : "Continue"}
+          </button>
+        </form>
+
+        <button
+          onClick={() => router.push("/dashboard")}
+          style={{ marginTop: "14px", width: "100%", height: "42px", fontSize: "13px", color: "#a1a1aa", backgroundColor: "transparent", border: "1px solid #f4f4f5", borderRadius: 0, cursor: "pointer", fontFamily: "inherit" }}
+        >
+          Skip for now
+        </button>
+
+        <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
+
+  // Step 2: Show QR code
+  if (step === "scan") {
+    return (
+      <div>
+        <h1 style={{ fontSize: "28px", fontWeight: 600, letterSpacing: "-0.03em", lineHeight: 1.15, color: "#09090b", marginBottom: "8px" }}>
+          Scan QR code
+        </h1>
+        <p style={{ fontSize: "14px", color: "#71717a", lineHeight: 1.5, marginBottom: "28px" }}>
+          Open Google Authenticator and scan this code.
         </p>
 
         {qrCode && (
@@ -116,20 +178,8 @@ export default function MfaSetupPage() {
 
             {secret && (
               <div style={{ marginTop: "16px" }}>
-                <p style={{ fontSize: "12px", color: "#a1a1aa", marginBottom: "6px" }}>
-                  Or enter the key manually:
-                </p>
-                <code style={{
-                  display: "block",
-                  fontFamily: "monospace",
-                  fontSize: "13px",
-                  backgroundColor: "#fafafa",
-                  border: "1px solid #e4e4e7",
-                  padding: "8px 12px",
-                  color: "#3f3f46",
-                  letterSpacing: "0.1em",
-                  wordBreak: "break-all",
-                }}>
+                <p style={{ fontSize: "12px", color: "#a1a1aa", marginBottom: "6px" }}>Or enter the key manually:</p>
+                <code style={{ display: "block", fontFamily: "monospace", fontSize: "13px", backgroundColor: "#fafafa", border: "1px solid #e4e4e7", padding: "8px 12px", color: "#3f3f46", letterSpacing: "0.1em", wordBreak: "break-all" }}>
                   {secret.match(/.{1,4}/g)?.join(" ") || secret}
                 </code>
               </div>
@@ -137,47 +187,23 @@ export default function MfaSetupPage() {
           </div>
         )}
 
-        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-          <button
-            onClick={() => setStep("verify")}
-            style={{
-              width: "100%",
-              height: "42px",
-              fontSize: "14px",
-              fontWeight: 500,
-              color: "#fff",
-              backgroundColor: "#09090b",
-              border: "none",
-              borderRadius: 0,
-              cursor: "pointer",
-              letterSpacing: "-0.01em",
-              fontFamily: "inherit",
-            }}
-          >
-            I&apos;ve scanned the code
-          </button>
-          <button
-            onClick={() => router.push("/dashboard")}
-            style={{
-              width: "100%",
-              height: "42px",
-              fontSize: "13px",
-              fontWeight: 400,
-              color: "#a1a1aa",
-              backgroundColor: "transparent",
-              border: "1px solid #f4f4f5",
-              borderRadius: 0,
-              cursor: "pointer",
-              fontFamily: "inherit",
-            }}
-          >
-            Skip for now
-          </button>
-        </div>
+        <button
+          onClick={() => setStep("verify")}
+          style={{ width: "100%", height: "42px", fontSize: "14px", fontWeight: 500, color: "#fff", backgroundColor: "#09090b", border: "none", borderRadius: 0, cursor: "pointer", fontFamily: "inherit" }}
+        >
+          I&apos;ve scanned the code
+        </button>
+        <button
+          onClick={() => router.push("/dashboard")}
+          style={{ marginTop: "10px", width: "100%", height: "42px", fontSize: "13px", color: "#a1a1aa", backgroundColor: "transparent", border: "1px solid #f4f4f5", borderRadius: 0, cursor: "pointer", fontFamily: "inherit" }}
+        >
+          Skip for now
+        </button>
       </div>
     );
   }
 
+  // Step 3: Verify code
   return (
     <div>
       <button
@@ -209,23 +235,9 @@ export default function MfaSetupPage() {
             onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
             maxLength={6}
             required
-            disabled={loading}
             autoFocus
-            style={{
-              width: "100%",
-              height: "52px",
-              padding: "0 16px",
-              fontSize: "24px",
-              fontFamily: "monospace",
-              color: "#09090b",
-              backgroundColor: "#fff",
-              border: "1px solid #e4e4e7",
-              borderRadius: 0,
-              outline: "none",
-              boxSizing: "border-box",
-              letterSpacing: "0.25em",
-              textAlign: "center",
-            }}
+            disabled={loading}
+            style={{ ...inputS, height: "52px", fontSize: "24px", fontFamily: "monospace", letterSpacing: "0.25em", textAlign: "center" }}
             onFocus={(e) => (e.target.style.borderColor = "#09090b")}
             onBlur={(e) => (e.target.style.borderColor = "#e4e4e7")}
           />
@@ -237,27 +249,7 @@ export default function MfaSetupPage() {
           </div>
         )}
 
-        <button
-          type="submit"
-          disabled={loading || code.length !== 6}
-          style={{
-            width: "100%",
-            height: "42px",
-            fontSize: "14px",
-            fontWeight: 500,
-            color: "#fff",
-            backgroundColor: (loading || code.length !== 6) ? "#a1a1aa" : "#09090b",
-            border: "none",
-            borderRadius: 0,
-            cursor: (loading || code.length !== 6) ? "not-allowed" : "pointer",
-            letterSpacing: "-0.01em",
-            fontFamily: "inherit",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: "8px",
-          }}
-        >
+        <button type="submit" disabled={loading || code.length !== 6} style={btnS(loading || code.length !== 6)}>
           {loading ? (
             <>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style={{ animation: "spin 1s linear infinite" }}>
