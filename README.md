@@ -88,6 +88,7 @@ The dashboard redirects to `/mfa-setup` whenever `user.twoFactorEnabled` is fals
 | Session | Seven days, HTTP-only cookie, `SameSite=Lax`, `Secure` in production |
 | Session cache | Five-minute signed cookie cache; the database remains the source of truth |
 | Rate limiting | Database-backed (`rateLimit` table), so limits hold across serverless instances |
+| Recipient validation | The auth serverless function checks the recipient domain's MX records, with an RFC 5321 A/AAAA fallback, before an OTP is sent |
 | Login/signup separation | A server-side guard requires an existing account for sign-in and a new address for signup. Unknown logins receive a create-account message; existing signups receive a sign-in message |
 | JWT | Better Auth JWT plugin; short-lived tokens available at `/api/auth/token` and public keys at `/api/auth/jwks` |
 | Transport headers | `nosniff`, `DENY` framing, strict referrer policy, permissions policy, HSTS and CSP in production |
@@ -181,7 +182,7 @@ NEXT_PUBLIC_APP_URL=http://localhost:3001
 TURSO_DATABASE_URL=libsql://your-database.turso.io
 TURSO_AUTH_TOKEN=your-turso-token
 RESEND_API_KEY=re_your_key
-EMAIL_FROM=MFA System <onboarding@resend.dev>
+EMAIL_FROM=MFA System <noreply@100xsystems.dev>
 PEXELS_API_KEY=your-pexels-key
 ```
 
@@ -211,26 +212,37 @@ In production, a missing `RESEND_API_KEY` is an error. The app does not silently
 
 ---
 
-## Resend test-domain limitation
+## Resend sender domain
 
-This is the most common setup problem.
-
-The default sender is:
+This deployment sends from:
 
 ```env
-EMAIL_FROM=MFA System <onboarding@resend.dev>
+EMAIL_FROM=MFA System <noreply@100xsystems.dev>
 ```
 
-Resend's `onboarding@resend.dev` test sender **only delivers to the email address that owns the Resend account**. It cannot deliver to arbitrary users until you verify a sending domain.
+`100xsystems.dev` is verified in Resend, so this sender can deliver to any valid recipient. Resend's `onboarding@resend.dev` test sender **only delivers to the email address that owns the Resend account** and should not be used for real users.
 
-For real users:
+To use a different domain:
 
-1. Add and verify a domain in the Resend dashboard.
+1. Add and verify the domain in the Resend dashboard, including the DNS records Resend requires.
 2. Create a sender such as `MFA System <no-reply@yourdomain.com>`.
-3. Set `EMAIL_FROM` to that sender.
+3. Set `EMAIL_FROM` in `.env.local` and in the Vercel project.
 4. Redeploy.
 
 If you test with `delivered@resend.dev`, Resend's test address, delivery succeeds but there is no inbox to read. Use the console fallback locally, or send to the Resend account owner's address.
+
+## Recipient MX validation
+
+`src/lib/auth/email-domain-guard.ts` runs in the Node.js auth serverless function before an OTP is created. It resolves the recipient domain's MX records:
+
+- A usable MX record allows the send.
+- No MX records fall back to A/AAAA records, as permitted by RFC 5321.
+- A null MX (`0 .`) or no address records returns `EMAIL_DOMAIN_UNREACHABLE` and no email is sent.
+- Transient DNS failures fail open so a resolver outage cannot block sign-in.
+- Results are cached in memory for 5-10 minutes per warm serverless instance.
+- The check is skipped when `RESEND_API_KEY` is empty, because local development prints the OTP to the console.
+
+This is a deliverability guard, not a security boundary. It requires the Node.js runtime; the Edge runtime does not provide `node:dns`.
 
 ---
 
@@ -297,7 +309,7 @@ Set these environment variables in the Vercel project:
 - `TURSO_DATABASE_URL`
 - `TURSO_AUTH_TOKEN`
 - `RESEND_API_KEY`
-- `EMAIL_FROM`
+- `EMAIL_FROM` (for example `MFA System <noreply@100xsystems.dev>`)
 - `PEXELS_API_KEY`
 - Optional: `TRUSTED_ORIGINS`
 
@@ -361,6 +373,7 @@ This build does not contain a password field. If you see one, the deployment is 
 
 - Check the Resend dashboard for delivery events.
 - If using `onboarding@resend.dev`, confirm the recipient is the Resend account owner.
+- If the request is rejected with **That email domain cannot receive mail**, the recipient domain has no MX or A/AAAA records. Check the address for typos.
 - For local development, leave `RESEND_API_KEY` empty and read the code from the server console.
 - Check the `EMAIL_FROM` value. It must be a verified sender.
 
@@ -411,11 +424,13 @@ src/
 │   └── ui/                         Button, input, label, alert, OTP, copy
 └── lib/
     ├── auth.ts                     Better Auth configuration
+    ├── auth/email-domain-guard.ts  Recipient MX/A/AAAA validation
     ├── auth/email-otp-account-guard.ts  Login/signup account checks
     ├── auth/email-otp-two-factor.ts MFA enforcement hook
     ├── auth-client.ts
     ├── auth-errors.ts
     ├── email.ts                    Resend sender + local fallback
+    ├── email/mx.ts                 MX and address-record lookup
     ├── pexels.ts                   Photo fetch + fallback
     ├── session.ts                  Server session helper
     ├── url.ts                      Vercel-aware URLs and trusted origins

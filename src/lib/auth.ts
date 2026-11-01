@@ -3,6 +3,7 @@ import { kyselyAdapter } from "@better-auth/kysely-adapter";
 import { Kysely } from "kysely";
 import { LibsqlDialect } from "kysely-libsql";
 import { emailOTP, jwt, twoFactor } from "better-auth/plugins";
+import { emailDomainGuard } from "@/lib/auth/email-domain-guard";
 import { emailOtpAccountGuard } from "@/lib/auth/email-otp-account-guard";
 import { emailOtpTwoFactorChallenge } from "@/lib/auth/email-otp-two-factor";
 import { sendOtpEmail } from "@/lib/email";
@@ -109,6 +110,8 @@ export const auth = betterAuth({
     // mistyped login from silently creating a new account, and points an
     // existing address on the signup screen back to sign-in.
     emailOtpAccountGuard(),
+    // Reject recipient domains with no MX/A records before Resend is called.
+    emailDomainGuard(),
     // Email OTP signs the user in before the built-in two-factor hook can run.
     // This plugin closes that gap and turns every OTP sign-in into a TOTP challenge.
     emailOtpTwoFactorChallenge(),

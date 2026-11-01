@@ -10,6 +10,8 @@ const MESSAGES: Record<string, string> = {
     "No account exists for this email. Create an account to continue.",
   ACCOUNT_ALREADY_EXISTS:
     "An account already exists for this email. Sign in instead.",
+  EMAIL_DOMAIN_UNREACHABLE:
+    "That email domain cannot receive mail. Check the address and try again.",
   INVALID_OTP: "That code is incorrect or has expired. Request a new one.",
   OTP_EXPIRED: "That code has expired. Request a new one.",
   TOO_MANY_ATTEMPTS: "Too many attempts. Request a new code.",

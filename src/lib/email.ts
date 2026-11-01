@@ -98,7 +98,7 @@ export async function sendOtpEmail(input: SendOtpEmailInput): Promise<void> {
   }
 
   const from =
-    process.env.EMAIL_FROM || "MFA System <onboarding@resend.dev>";
+    process.env.EMAIL_FROM || "MFA System <noreply@100xsystems.dev>";
 
   const { error } = await resend.emails.send({
     from,
