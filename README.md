@@ -182,7 +182,7 @@ NEXT_PUBLIC_APP_URL=http://localhost:3001
 TURSO_DATABASE_URL=libsql://your-database.turso.io
 TURSO_AUTH_TOKEN=your-turso-token
 RESEND_API_KEY=re_your_key
-EMAIL_FROM=MFA System <noreply@100xsystems.dev>
+EMAIL_FROM=noreply@100xsystems.dev
 PEXELS_API_KEY=your-pexels-key
 ```
 
@@ -217,7 +217,7 @@ In production, a missing `RESEND_API_KEY` is an error. The app does not silently
 This deployment sends from:
 
 ```env
-EMAIL_FROM=MFA System <noreply@100xsystems.dev>
+EMAIL_FROM=noreply@100xsystems.dev
 ```
 
 `100xsystems.dev` is verified in Resend, so this sender can deliver to any valid recipient. Resend's `onboarding@resend.dev` test sender **only delivers to the email address that owns the Resend account** and should not be used for real users.
@@ -225,7 +225,7 @@ EMAIL_FROM=MFA System <noreply@100xsystems.dev>
 To use a different domain:
 
 1. Add and verify the domain in the Resend dashboard, including the DNS records Resend requires.
-2. Create a sender such as `MFA System <no-reply@yourdomain.com>`.
+2. Create a sender such as `no-reply@yourdomain.com`.
 3. Set `EMAIL_FROM` in `.env.local` and in the Vercel project.
 4. Redeploy.
 
@@ -309,7 +309,7 @@ Set these environment variables in the Vercel project:
 - `TURSO_DATABASE_URL`
 - `TURSO_AUTH_TOKEN`
 - `RESEND_API_KEY`
-- `EMAIL_FROM` (for example `MFA System <noreply@100xsystems.dev>`)
+- `EMAIL_FROM` (for example `noreply@100xsystems.dev`)
 - `PEXELS_API_KEY`
 - Optional: `TRUSTED_ORIGINS`
 
